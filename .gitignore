@@ -1,5 +1,5 @@
 __pycache__/
 *.py[cod]
 .DS_Store
-var/
 data/video/
+/var/media_cache
