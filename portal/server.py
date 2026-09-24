@@ -35,6 +35,22 @@ STATIC = Path(__file__).resolve().parent / "static"
 STATE = Path(os.environ.get("SUPERMEMORY_PORTAL_STATE_DIR", BASE / "var"))
 DB = STATE / "reviews.sqlite3"
 CACHE = STATE / "media_cache"
+FFMPEG_DIR = os.environ.get("SUPERMEMORY_FFMPEG_DIR", "")
+VIDEO_ENCODER = os.environ.get("SUPERMEMORY_VIDEO_ENCODER", "libx264")
+SUPPORTED_VIDEO_ENCODERS = {"libx264", "h264_nvenc", "h264_amf", "h264_qsv"}
+
+
+def media_tool_path(name):
+    if FFMPEG_DIR:
+        suffix = ".exe" if os.name == "nt" else ""
+        candidate = Path(FFMPEG_DIR) / (name + suffix)
+        if candidate.is_file():
+            return str(candidate)
+    return name
+
+
+FFMPEG = media_tool_path("ffmpeg")
+FFPROBE = media_tool_path("ffprobe")
 SEGMENT_SECONDS = 45
 SAFETY_SECONDS = 0.25
 MAX_CACHE_BYTES = 2 * 1024**3
@@ -58,12 +74,65 @@ class MediaToolUnavailable(RuntimeError):
 
 
 def missing_media_tools():
-    return [tool for tool in ("ffprobe", "ffmpeg") if shutil.which(tool) is None]
+    return [tool for tool in (FFPROBE, FFMPEG) if shutil.which(tool) is None]
 
 
 def media_tool_message(tools):
-    return (f"Video playback needs {', '.join(tools)} on PATH. Install FFmpeg, "
-            "then restart the terminal and portal.")
+    return (f"Video playback needs {', '.join(tools)}. Set "
+            "SUPERMEMORY_FFMPEG_DIR to the FFmpeg bin directory, then restart "
+            "the portal.")
+
+
+def video_encoder_available():
+    null_device = "NUL" if os.name == "nt" else "/dev/null"
+    try:
+        result = subprocess.run(
+            [FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+             "-i", "color=c=black:s=320x180:r=1", "-frames:v", "1",
+                         *video_encoder_options(),
+             "-f", "null", null_device],
+            capture_output=True, text=True, timeout=30, check=False)
+    except OSError:
+        return False
+    return result.returncode == 0
+
+
+def video_encoder_options():
+    if VIDEO_ENCODER == "libx264":
+        return ["-c:v", VIDEO_ENCODER, "-preset", "veryfast", "-crf", "23"]
+    if VIDEO_ENCODER == "h264_amf":
+        return ["-c:v", VIDEO_ENCODER, "-quality", "speed", "-rc", "cqp",
+                "-qp_i", "23", "-qp_p", "23"]
+    if VIDEO_ENCODER == "h264_qsv":
+        return ["-c:v", VIDEO_ENCODER, "-preset", "veryfast", "-global_quality", "23"]
+    return ["-c:v", VIDEO_ENCODER, "-preset", "p4", "-cq", "23"]
+
+
+def print_media_setup_check():
+    configured = os.environ.get("SUPERMEMORY_FFMPEG_DIR") or "<not set>"
+    missing = missing_media_tools()
+    print("[setup] SUPERMEMORY_FFMPEG_DIR=" + configured, flush=True)
+    print("[setup] ffmpeg=" + (shutil.which(FFMPEG) or "not found"), flush=True)
+    print("[setup] ffprobe=" + (shutil.which(FFPROBE) or "not found"), flush=True)
+    print("[setup] video encoder=" + VIDEO_ENCODER, flush=True)
+    if VIDEO_ENCODER not in SUPPORTED_VIDEO_ENCODERS:
+        print("[setup] video encoder check: FAILED", file=sys.stderr, flush=True)
+        print("[setup] Supported encoders: " + ", ".join(sorted(SUPPORTED_VIDEO_ENCODERS)),
+              file=sys.stderr, flush=True)
+        return
+    if not missing and not video_encoder_available():
+        print("[setup] video encoder check: FAILED", file=sys.stderr, flush=True)
+        print("[setup] The selected encoder is not usable on this machine. "
+              "Use $env:SUPERMEMORY_VIDEO_ENCODER = 'libx264' or install the "
+              "matching GPU driver.", file=sys.stderr, flush=True)
+        return
+    if missing:
+        print("[setup] FFmpeg check: FAILED", file=sys.stderr, flush=True)
+        print("[setup] PowerShell: $env:SUPERMEMORY_FFMPEG_DIR = "
+              "'C:\\ffmpeg-7.0.1-full_build\\bin'", file=sys.stderr, flush=True)
+        print("Warning: " + media_tool_message(missing), file=sys.stderr, flush=True)
+    else:
+        print("[setup] FFmpeg check: OK", flush=True)
 
 
 def now_iso():
@@ -169,7 +238,7 @@ def video_duration(path):
             return PROBE_CACHE[key]
     try:
         result = subprocess.run(
-            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+            [FFPROBE, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
             capture_output=True, text=True, timeout=30, check=False)
     except OSError as exc:
@@ -379,10 +448,9 @@ def clipped_media(item, video_id, segment):
             return target
         tmp = CACHE / (key + "." + secrets.token_hex(4) + ".tmp.mp4")
         command = [
-            "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+            FFMPEG, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-ss", str(at), "-i", str(source), "-t", f"{length:.3f}",
-            "-map", "0:v:0", "-map", "0:a:0?", "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "23", "-c:a", "aac",
+            "-map", "0:v:0", "-map", "0:a:0?", *video_encoder_options(), "-c:a", "aac",
             "-b:a", "96k", "-movflags", "+faststart", str(tmp),
         ]
         try:
@@ -698,9 +766,7 @@ def main():
     parser.add_argument("--port", type=int, default=8765)
     args = parser.parse_args()
     init_db()
-    missing = missing_media_tools()
-    if missing:
-        print("Warning: " + media_tool_message(missing), file=sys.stderr, flush=True)
+    print_media_setup_check()
     server = ThreadingHTTPServer((args.host, args.port), PortalHandler)
     print(f"Review portal: http://{args.host}:{args.port}", flush=True)
     try:

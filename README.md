@@ -11,22 +11,34 @@ Watch Demo Here:
 
 ## Run
 
-Requirements: Python 3.10+ and `ffmpeg`/`ffprobe` on `PATH`. See [`requirements.txt`](requirements.txt). The portal itself uses only the Python standard library, so `pip install -r requirements.txt` has no packages to install. Install FFmpeg through your operating system's package manager.
+Requirements: Python 3.10+ and FFmpeg. The portal itself uses only the Python standard library.
 
-On Windows, download a build from the [FFmpeg download page](https://ffmpeg.org/download.html#build-windows), extract it, and add its `bin` folder (containing `ffmpeg.exe` and `ffprobe.exe`) to your user or system `PATH`. Open a **new** PowerShell window and check:
+Set the FFmpeg `bin` directory and one video encoder before starting the portal. Run only one of these PowerShell configurations:
 
 ```powershell
-where.exe ffmpeg
-where.exe ffprobe
-ffmpeg -version
-ffprobe -version
-```
-
-Then restart the portal. If either `where.exe` command finds nothing, video playback cannot work yet. The QA page and transcripts still load, and the portal displays the missing-tool message beside the player.
-
-```sh
+# AMD GPU
+$env:SUPERMEMORY_FFMPEG_DIR = 'C:\ffmpeg-7.0.1-full_build\bin'
+$env:SUPERMEMORY_VIDEO_ENCODER = 'h264_amf'
 python portal/server.py --port 9876
 ```
+
+For an NVIDIA GPU, use `h264_nvenc` instead:
+
+```powershell
+$env:SUPERMEMORY_FFMPEG_DIR = 'C:\ffmpeg-7.0.1-full_build\bin'
+$env:SUPERMEMORY_VIDEO_ENCODER = 'h264_nvenc'
+python portal/server.py --port 9876
+```
+
+For CPU-only encoding, use `libx264`:
+
+```powershell
+$env:SUPERMEMORY_FFMPEG_DIR = 'C:\ffmpeg-7.0.1-full_build\bin'
+$env:SUPERMEMORY_VIDEO_ENCODER = 'libx264'
+python portal/server.py --port 9876
+```
+
+The FFmpeg directory must contain `ffmpeg.exe` and `ffprobe.exe`. Hardware encoding also requires a supported GPU driver.
 
 Open <http://127.0.0.1:9876>. Enter a reviewer name and a passphrase of at least eight characters. A new name creates a reviewer account; entering the same name and passphrase resumes its drafts. Select Person 1–10 to see that person's questions. Person 9 has 310 QA items.
 

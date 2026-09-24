@@ -6,6 +6,7 @@ const state = {
   revision: 0, savedRevision: 0, saving: null, saveTimer: null,
   recording: null, segment: 0, transcript: [], requestSequence: 0,
   captionsEnabled: localStorage.getItem('smvqa_captions') !== 'off',
+  reviewShortcutHandler: null,
 };
 const ISSUE_OPTIONS = [
   'unclear wording', 'incorrect answer key', 'multiple valid choices',
@@ -193,7 +194,7 @@ function renderQuestion() {
         <div id="timeline-wrap" class="hidden"><div class="timeline-head"><span>Recording timeline</span><span id="position-label">0:00 / 0:00</span></div>
           <input id="timeline" class="timeline" type="range" min="0" max="1" step="0.1" value="0" aria-label="Seek within eligible recording"><div class="timeline-times"><span>Start</span><span id="timeline-end">Question cutoff</span></div>
           <div class="video-actions"><button class="button secondary" id="play-point" type="button">Play from here ▶</button><button class="button secondary" id="toggle-captions" type="button" aria-pressed="${state.captionsEnabled}">${state.captionsEnabled ? 'CC On' : 'CC Off'}</button><span class="video-status" id="video-status"></span></div></div>
-        <div id="transcript-section" class="hidden"><div class="timeline-head"><span>Redacted transcript</span><span class="muted small" id="transcript-source"></span></div><div class="transcript" id="transcript"></div></div>
+        <div id="transcript-section"><div class="timeline-head"><span>Redacted transcript</span><span class="muted small" id="transcript-source"></span></div><div class="transcript" id="transcript"><div class="transcript-empty">Choose a recording to load its transcript.</div></div></div>
         <div class="notice">Only eligible time is served. The player loads short, server-clipped segments; source videos are never exposed directly.</div></section>
     </div><div class="stack"><section class="panel card"><div class="card-head"><div><h2>Your independent review</h2><p>Choose each required judgment, then submit.</p></div></div>
       ${state.status === 'submitted' ? '<div class="locked-banner">✓ Submitted. This review is locked to preserve independent judgments.</div>' : ''}
@@ -209,7 +210,7 @@ function renderQuestion() {
         <div class="form-group"><div class="field" style="margin-bottom:0"><label for="feedback">7. Feedback <span class="muted small">(optional)</span></label><textarea id="feedback" maxlength="5000" placeholder="Explain uncertain judgments or suggest a correction…">${esc(p.feedback)}</textarea></div></div>
         <div class="form-footer"><div><button type="button" class="button ghost" id="previous-q">← Previous</button><button type="button" class="button ghost" id="next-q">Next →</button></div>
           <div class="right"><button type="button" class="button secondary" id="save-draft">Save draft</button><button type="submit" class="button green" id="submit-review">Submit review</button></div></div><div id="form-error" class="form-error"></div>
-      </form></section><details class="guide"><summary>Review guide</summary><ol><li>Predict from recordings available before the question.</li><li>Rate the cited evidence independently of your predicted answer.</li><li>Mark missing or late evidence as an issue, and suggest corrected spans where possible.</li><li>Drafts autosave. Submitted reviews are locked.</li></ol></details></div></div>`;
+      </form></section><details class="guide"><summary>Review guide</summary><ol><li>Predict from recordings available before the question.</li><li>Rate the cited evidence independently of your predicted answer.</li><li>Mark missing or late evidence as an issue, and suggest corrected spans where possible.</li><li>Drafts autosave. Submitted reviews automatically open the next question.</li><li>Press <strong>A</strong> for Clear / Answerable / Sufficient and submit, or <strong>D</strong> for Clear / Unable to verify / Not applicable and submit. Shortcuts are disabled while typing.</li><li>The redacted transcript panel is expanded by default after opening a question.</li></ol></details></div></div>`;
   bindQuestion();
   if (p.edit_evidence) renderEditedSpans();
   if (state.status === 'submitted') document.querySelectorAll('#choices input').forEach(input => input.disabled = true);
@@ -237,13 +238,33 @@ function renderEditedSpans(rows = state.payload.edited_spans) {
 }
 function bindQuestion() {
   const q = state.detail;
+  if (state.reviewShortcutHandler) document.removeEventListener('keydown', state.reviewShortcutHandler);
+  state.reviewShortcutHandler = async event => {
+    if (event.repeat || state.status === 'submitted' || !state.detail ||
+        ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(document.activeElement?.tagName)) return;
+    const presets = {
+      a: {clarity:'Clear', answerability:'Answerable', evidence_correctness:'Sufficient and correctly timed'},
+      d: {clarity:'Clear', answerability:'Unable to verify within the review', evidence_correctness:'Not applicable'},
+    };
+    const preset = presets[event.key.toLowerCase()];
+    if (!preset) return;
+    event.preventDefault();
+    for (const [name, value] of Object.entries(preset)) {
+      const input = document.querySelector(`input[name="${name}"][value="${CSS.escape(value)}"]`);
+      if (input) input.checked = true;
+    }
+    changed();
+    await submitReview();
+  };
+  document.addEventListener('keydown', state.reviewShortcutHandler);
   document.querySelectorAll('[data-evidence]').forEach(button => button.addEventListener('click', () => {
     const span = q.evidence_spans[Number(button.dataset.evidence)];
     chooseRecording(span.video_id); seekTo(span.start, true);
   }));
-  document.querySelectorAll('[data-transcript]').forEach(button => button.addEventListener('click', () => {
+  document.querySelectorAll('[data-transcript]').forEach(button => {
+    button.addEventListener('click', () => showAudioTranscript(Number(button.dataset.transcript), button));
     showAudioTranscript(Number(button.dataset.transcript), button);
-  }));
+  });
   document.querySelector('#recording-select')?.addEventListener('change', event => chooseRecording(event.target.value));
   document.querySelector('#timeline')?.addEventListener('input', event => {
     document.querySelector('#position-label').textContent = `${clock(event.target.value)} / ${clock(state.recording?.allowed_until)}`;
@@ -363,7 +384,15 @@ async function submitReview() {
     document.querySelector('#review-form').classList.add('locked');
     document.querySelector('#review-form').insertAdjacentHTML('afterbegin','<div class="locked-banner">✓ Submitted. This review is locked to preserve independent judgments.</div>');
     document.querySelectorAll('#choices input').forEach(input => input.disabled = true);
-    setSaveState('saved','Submitted'); renderQuestionList(); toast('Review submitted. You can move to the next question.');
+    setSaveState('saved','Submitted'); renderQuestionList();
+    const index = state.questions.findIndex(item => item.question_id === state.currentId);
+    const next = state.questions[index + 1];
+    if (next) {
+      toast('Review submitted. Opening the next question.');
+      await openQuestion(next.question_id);
+    } else {
+      toast('Review submitted. This was the last question.');
+    }
   } catch (error) { document.querySelector('#form-error').textContent = error.message; button.disabled = false; }
 }
 function moveQuestion(delta) {
@@ -455,7 +484,6 @@ function chooseRecording(videoId) {
   document.querySelector('#video-box').classList.remove('has-video');
   document.querySelector('#recording-select').value = r?.video_id || '';
   document.querySelector('#timeline-wrap').classList.toggle('hidden', !r);
-  document.querySelector('#transcript-section').classList.toggle('hidden', !r);
   document.querySelector('#toggle-captions').disabled = !r?.transcript_available;
   if (!r) { document.querySelector('#video-placeholder').innerHTML = '<strong>Choose a recording</strong>Then select a point on its timeline or jump to a cited span.'; return; }
   const timeline = document.querySelector('#timeline'); timeline.max = Math.max(0, r.allowed_until-.3); timeline.value = 0;
